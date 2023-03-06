@@ -12,10 +12,9 @@ export default class extends Command {
     const channelID = client.isDev ? '859483633534238762' : msg.channel.id;
     const challenge = await getChallengeByChannelID(channelID);
 
-    const challengeID = challenge.ID;
     if (!challenge) return;
 
-    const entries = await getDayEntries(msg.author.id, challengeID);
+    const entries = await getDayEntries(msg.author.id, challenge.ID);
 
     const dayEntries = Object.entries(groupBy(entries, (x) => x.Day));
     const dayList = dayEntries

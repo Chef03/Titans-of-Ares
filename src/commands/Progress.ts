@@ -9,8 +9,11 @@ export default class extends Command {
   name = 'progress';
 
   async exec(msg: Message) {
+
     const channelID = client.isDev ? '859483633534238762' : msg.channel.id;
     const challenge = await getChallengeByChannelID(channelID);
+    if (!challenge) return;
+
     const challengeID = challenge.ID;
     const entries = await getDayEntries(msg.author.id, challengeID);
 

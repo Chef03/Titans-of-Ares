@@ -3,10 +3,10 @@ import path from 'path';
 import { xpLog } from './internals/xpLog';
 import { energyMainLoop } from './internals/energy';
 import { Buff } from './internals/Buff';
-import Rank from './commands/Rank';
 import Client from './internals/Client';
 import { TeamArena } from './internals/TeamArena';
 import { SquadBoss } from './internals/Squadboss';
+import { Upload } from './internals/Upload';
 
 export const client = new Client(path.resolve(__dirname, process.env.DB!));
 
@@ -16,6 +16,8 @@ client.addBlockingPollHandler(energyMainLoop);
 client.addBlockingPollHandler(Buff.mainLoop);
 client.addBlockingPollHandler(TeamArena.mainLoop);
 client.addBlockingPollHandler(SquadBoss.mainLoop);
+client.addBlockingPollHandler(Upload.mainLoop);
+
 
 client.commandManager.registerCommands(path.resolve(__dirname, './commands'));
 
@@ -29,7 +31,9 @@ client.bot.once('ready', async () => {
   client.mainTextChannel = channels.get(client.mainTextChannelID) as TextChannel;
   client.teamArenaChannel = channels.get(client.teamArenaChannelID) as TextChannel;
   client.startPollEvent();
+
 });
+
 
 client.bot.on('message', async (msg) => {
   const words = msg.content.split(' ');
@@ -40,19 +44,20 @@ client.bot.on('message', async (msg) => {
     msg.content.startsWith('Registered')
     && (authorID === client.oldBotID || authorID === client.devID)
   ) {
-    const rank = new Rank();
-    rank.exec(msg, []);
     xpLog(msg);
-  } else if (command.startsWith('!') && !msg.author.bot) {
+  } else if ((command.startsWith('!') || command.startsWith('$upload')) && !msg.author.bot) {
     client.xpLogTriggers = authorID;
-  } else if (!command.startsWith(client.prefix) || msg.author.bot) {
+  }
+  if (!command.startsWith(client.prefix) || msg.author.bot) {
     return;
   }
 
   if (client.activePlayers.has(authorID)) {
     return msg.channel.send('There is already another command running');
   }
-  client.activePlayers.add(authorID);
+  if (!command.startsWith('$upload')) {
+    client.activePlayers.add(authorID);
+  }
   await client.commandManager.handleMessage(msg);
   client.activePlayers.delete(authorID);
 });

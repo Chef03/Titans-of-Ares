@@ -39,7 +39,7 @@ export default class Squad extends Command {
 
   async exec(message: Message, _args: string[]) {
 
-    if(message.channel.type === 'dm') return;
+    if (message.channel.type === 'dm') return;
 
     const player = await Player.getPlayer(message.member!);
 
@@ -58,8 +58,6 @@ export default class Squad extends Command {
     const timeLeft = nextMonday.diffNow(['hour', 'minute', 'second']);
     const formattedTime = timeLeft.toFormat('hh:mm:ss');
 
-
-
     if (player.squadBossEnergy < 1 && !isMember && !existingApplication) {
 
       return message.channel.send(`No squad boss energy! Squad boss energy gets replenished in: \`${formattedTime}\` (Hours:Minutes:Seconds)`)
@@ -69,10 +67,6 @@ export default class Squad extends Command {
 
     const ownerSql = 'SELECT * FROM squads WHERE owner = $owner';
     const existingSquad = await dbGet<dbSquad>(ownerSql, { $owner: message.author.id });
-
-
-
-
 
     if (existingSquad) {
 
@@ -255,9 +249,6 @@ export default class Squad extends Command {
 
           handler.addButton(buttons[i], member.user!.username!, async () => {
 
-
-
-
             await dbRun('DELETE FROM squadMembers WHERE discordID = $userID AND squadName=$squadName', {
 
               $userID: member.user!.id,
@@ -380,7 +371,6 @@ export default class Squad extends Command {
           });
 
           message.channel.send(`${message.author.username} was set to \`back\``);
-
 
 
         });

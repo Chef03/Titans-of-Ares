@@ -97,8 +97,6 @@ export default class extends Command {
         logChannel.send(`${name} is now on **level ${currentLevel}**`);
       }
 
-      const rank = new Rank();
-      rank.exec(msg, ['10']);
       return;
     } if (awardType === 'fragment') {
       const amountInt = parseInt(amount);

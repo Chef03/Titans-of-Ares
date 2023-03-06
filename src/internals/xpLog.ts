@@ -15,9 +15,11 @@ import { Player } from '../internals/Player';
 import { bold, getLevel, getXp } from '../internals/utils';
 import { MiningPickReward } from './MiningPickReward';
 import { RankRole } from './Rank';
+import { removeInventory } from '../db/inventory';
 
-const rgx = /^Registered\sDay:\s(?<day>\d+)\s.*Progress:\s(?<value>\d+[,|.]?\d*)\s(?<valueType>\w+).*$/;
+const rgx = /^Registered\sDay:\s(?<day>\d+)\s.*Progress:\s(?<value>-?\d+[,|.]?\d*)\s(?<valueType>\w+).*$/;
 
+//we need the day, value, and value type
 const tests = `
 Registered Day: 7 Progress: 6641 steps
 Registered Day: 8 Progress: 1 yoga
@@ -49,11 +51,12 @@ for (let i = 0; i < lines.length; i++) {
   assert.strictEqual(valueType, result[i].valueType);
 }
 
-export async function xpLog(msg: Message) {
+export async function xpLog(msg: Message, content?: string) {
+
   const member = msg.guild?.members.cache.get(client.xpLogTriggers);
   if (!member) return;
 
-  const lines = msg.content.split('\n');
+  const lines = content?.split('\n') || msg.content.split('\n');
   let accXP = 0;
 
   for (const line of lines) {
@@ -75,11 +78,27 @@ export async function xpLog(msg: Message) {
     const player = await Player.getPlayer(member);
     const totalXp = player.xp;
     const currentLevel = player.level;
-    const prevXp = totalXp - xp;
+    const prevXp = totalXp - Math.max(0, xp);
     const prevLevel = getLevel(prevXp);
     const { name } = player;
 
     client.logChannel.send(`${name} has earned \`${xp} xp\`!`);
+
+    //remove mining picks
+    if (xp < 0) {
+
+      const pickCount = Math.floor(Math.abs(xp) / 10);
+      for (let i = 0; i < pickCount; i++) {
+
+        await removeInventory(member.id, 'pick_mining')
+        await MiningPickReward.setUpperLimit(player);
+
+      }
+      msg.channel.send(`You have lost ${bold(pickCount)} mining picks.`)
+      return;
+
+    }
+
     accXP += xp;
 
     // workout buff
@@ -107,10 +126,20 @@ export async function xpLog(msg: Message) {
         oneLine`Ares has granted ${member} a 2 hour ${buff.name}
         for getting 10 points in the monthly challenge today!`,
       );
+
+      msg.channel.send(
+        oneLine`Ares has granted you a **2 hour** ${bold(buff.name)}
+      for getting **10 points** in the monthly challenge today!`,
+      );
+
+
     }
 
     if (currentLevel !== prevLevel) {
       client.logChannel.send(`${name} is now on **level ${currentLevel}**`);
+
+      msg.channel.send(`You are now on **level ${currentLevel}**`);
+
 
       await client.mainGuild.roles.fetch();
 
@@ -128,6 +157,12 @@ export async function xpLog(msg: Message) {
         client.logChannel.send(
           `Ares has promoted ${player.member} to ${bold(newRankRole.name)}!`,
         );
+
+
+        msg.channel.send(
+          `Ares has promoted you to ${bold(newRankRole.name)}!`,
+        );
+
       }
     }
   }
@@ -141,6 +176,13 @@ export async function xpLog(msg: Message) {
         oneLine`${player.member} has been awarded a **${fragment.name}** by Ares
         himself for great effort in working out.  Keep up the good work!`,
       );
+
+      msg.channel.send(
+        oneLine`You have been awarded a **${fragment.name}** by Ares
+        himself for great effort in working out.  Keep up the good work!`,
+      );
+
+
     }
 
     // set new upper limit
@@ -148,6 +190,7 @@ export async function xpLog(msg: Message) {
   }
 
   // mining pick reward
+
   if (player.xp >= player.miningPickReward) {
     const rewardBefore = MiningPickReward.totalLevelPassed(player.xp - accXP);
     const rewardAfter = MiningPickReward.totalLevelPassed(player.xp);
@@ -163,6 +206,12 @@ export async function xpLog(msg: Message) {
       `${player.member} has found **x${rewardCount} Mining Pick** by working out!`,
     );
 
-    MiningPickReward.setUpperLimit(player);
+    msg.channel.send(
+      `You have found **x${rewardCount} Mining Pick** by working out!`,
+    );
+
+
+    await MiningPickReward.setUpperLimit(player);
+
   }
 }

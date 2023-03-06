@@ -8,6 +8,7 @@ import { SafeFn } from './SafeFn';
 import { Player } from './Player';
 import { getUsers } from '../db/player';
 import { SquadPhase } from './Squadboss';
+import { Leaderboard } from './Leaderboard';
 
 type PollHandler = () => void;
 type BlockingPollHandler = () => Promise<void>;
@@ -59,6 +60,7 @@ export default class Client {
   teamArenaChannel!: TextChannel;
   mainTextChannel!: TextChannel;
 
+  leaderboard !: Leaderboard;
 
   /** functions to be run every 1 seconds interval */
   pollHandlers: PollHandler[] = [];
@@ -75,9 +77,12 @@ export default class Client {
 
   squadBossPhase = SquadPhase.REPLENISH;
 
+
   constructor(dbPath: string) {
+
     verbose();
     this.db = new Database(dbPath);
+
   }
 
   addPollHandler(fn: PollHandler) {
@@ -130,9 +135,11 @@ export default class Client {
     }, 1000);
   }
 
-  start() {
+  async start() {
     // create necessary tables if not exist
     this.db.exec(schema);
     this.bot.login(process.env.BOT_TOKEN);
+
+
   }
 }

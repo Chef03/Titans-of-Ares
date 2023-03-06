@@ -9,6 +9,7 @@ interface BookRaw {
     Lesson: string;
     Evaluation?: string;
     Finished: number;
+    image?:string
 }
 
 export type Book = Omit<BookRaw, "Finished"> & { Finished: boolean };
@@ -40,6 +41,7 @@ export interface BookOptions {
     $day: number;
     $name: string;
     $lesson: string;
+    $image:string
 }
 
 export async function registerBook(options: BookOptions) {
@@ -53,8 +55,8 @@ export async function registerBook(options: BookOptions) {
     }
 
     const sql = `
-    INSERT INTO Book (DiscordID, ChallengeID, Day, Name, Lesson)
-    VALUES ($userID, $challengeID, $day, $name, $lesson)
+    INSERT INTO Book (DiscordID, ChallengeID, Day, Name, Lesson, image)
+    VALUES ($userID, $challengeID, $day, $name, $lesson, $image)
   `
 
     return dbRun(sql, { ...options });

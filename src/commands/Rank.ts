@@ -7,7 +7,7 @@ import { client } from '../main';
 
 const first = 'https://cdn.discordapp.com/attachments/852546444086214676/860427588589846568/image0.jpg';
 const second = 'https://cdn.discordapp.com/attachments/574852830125359126/860430411423416360/unknown.png';
-const third = 'https://cdn.discordapp.com/attachments/576986467084140557/852846797041696798/iu.png';
+const third = 'https://cdn.discordapp.com/attachments/972783695666774046/1058427316092538890/2e2dff03032ba2567b01443713cba402_1.jpg';
 
 export const backgrounds = [
   first,
@@ -37,7 +37,7 @@ export default class extends Command {
     }
 
     const messages = await channel.messages.fetch();
-    let count = 10;
+    let count = 100;
 
     const rankCount = parseInt(args[0]);
 
@@ -61,6 +61,7 @@ export default class extends Command {
     players = players.slice(0, count);
 
     const files = await Promise.all(players.map((x) => x.getProfile()));
+
     channel.stopTyping();
 
     if (args.length === 0) {
@@ -74,16 +75,16 @@ export default class extends Command {
         const dmChannel = await author.createDM();
         await nukeBotMessages(dmChannel);
 
-      // eslint-disable-next-line no-empty
-      } catch(e) {
+        // eslint-disable-next-line no-empty
+      } catch (e) {
 
-    
+
 
       }
 
-        for (const file of files) {
-          await author.send(file);
-        }
+      for (const file of files) {
+        await author.send(file);
+      }
 
     }
   }

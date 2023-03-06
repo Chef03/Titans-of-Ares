@@ -421,7 +421,6 @@ export class Player extends Fighter {
   }
 
   async addArenaCoin(amount: number) {
-    console.log(typeof this.arenaCoins, typeof amount)
     await setArenaCoin(this.id, this.arenaCoins + amount);
     this.arenaCoins += amount;
   }

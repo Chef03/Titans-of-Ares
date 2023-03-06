@@ -41,7 +41,7 @@ export class Prompt {
     const collector = new MessageCollector(
       this.msg.channel as TextChannel,
       filter,
-      { max: 1, time: 60 * 1000, ...options }
+      { max: 1, time: 120 * 1000, ...options }
     );
 
     return new Promise<Message>((resolve, reject) => {

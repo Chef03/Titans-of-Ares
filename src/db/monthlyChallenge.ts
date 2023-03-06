@@ -1,3 +1,4 @@
+import { Snowflake } from "discord.js";
 import { dbAll, dbGet, dbRun } from "./promiseWrapper";
 
 export type ChallengeName =
@@ -26,6 +27,8 @@ export type ChallengeName =
   | "workoutselfie"
   | "personalphoto"
   | "personalgoal"
+  | "points"
+  | "weekstreak"
   ;
 
 export async function getChallengeId($channelId: string) {
@@ -74,6 +77,12 @@ export interface DayEntry {
   Value: number;
 }
 
+export interface ChallengeEntry {
+  ID: number,
+  DiscordID: Snowflake,
+  ChallengeID: number
+}
+
 export async function getCurrentChallenge() {
   const sql = `
   SELECT
@@ -86,9 +95,7 @@ export async function getCurrentChallenge() {
     Active,
     GoldCutoff,
     SilverCutoff,
-    BronzeCutoff,
-    Month,
-    Year
+    BronzeCutoff
   FROM Challenge
   ORDER BY ID DESC LIMIT 1
   `
@@ -126,6 +133,18 @@ export async function getConvertTable() {
   return convertTable;
 }
 
+
+export async function getConversionRate(lookupID: string) {
+
+  const convertTable = await getConvertTable();
+  const conversionRate = convertTable.get(lookupID);
+
+  // throw new Error(`conversion rate does not exists for "${lookupID}"`);
+
+  return conversionRate || 0;
+
+}
+
 export async function getEntryID($userID: string, $challengeID: number) {
   const sql = `
     SELECT ID
@@ -135,6 +154,15 @@ export async function getEntryID($userID: string, $challengeID: number) {
 
   const result = await dbGet<{ ID?: number }>(sql, { $userID, $challengeID });
   return result?.ID;
+}
+
+export async function getEntryCount(category: ChallengeName, userID: Snowflake): Promise<number> {
+
+  const challenge = await getCurrentChallenge();
+  const result = await getDayEntries(userID, challenge.ID);
+  const parsedData = result.filter(entry => entry.ValueType === category)
+  return parsedData.length;
+
 }
 
 export async function registerChallenge($userID: string, $challengeID: number) {
@@ -153,8 +181,7 @@ export async function deleteDayEntry(
   $challengeName: ChallengeName,
 ) {
   const sql = `
-    DELETE FROM DayEntry
-    WHERE EntryID = $entryID AND Day = $day AND ValueType = $challengeName
+    DELETE FROM DayEntry WHERE EntryID = $entryID AND Day = $day AND ValueType = $challengeName
   `
 
   const $entryID = await getEntryID($userID, $challengeID);

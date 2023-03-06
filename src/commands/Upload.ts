@@ -1,5 +1,5 @@
 import Command from "../internals/Command";
-import { Collection, Message, MessageAttachment, MessageEmbed } from "discord.js";
+import { Message, MessageAttachment, MessageEmbed } from "discord.js";
 import { CancelledInputError, Prompt } from "../internals/Prompt";
 import {
   BLUE_BUTTON,
@@ -12,6 +12,7 @@ import {
   parseDecimal,
   WHITE_BUTTON,
   NUMBER_BUTTONS,
+  nukeChannel,
 } from "../internals/utils";
 import { ButtonConfirmation, ButtonHandler } from "../internals/ButtonHandler";
 import { oneLine } from "common-tags";
@@ -27,10 +28,20 @@ import {
   Challenge,
   OverlapError,
   getDayEntries,
+  getEntryCount,
+  DayEntry,
 } from "../db/monthlyChallenge";
 import { DateTime } from "luxon";
 import { registerBook, getAllBooks, removeBook, finishBook } from "../db/book";
 import { finishGoal, getAllGoals, Goal, registerGoal, removeGoal } from "../db/goals";
+import groupBy from "lodash.groupby";
+import { getTotalPoints } from "../db/player";
+import { addXP } from "../db/xp";
+import { xpLog } from "../internals/xpLog";
+import { Player } from "../internals/Player";
+import { removeInventory } from "../db/inventory";
+import { MiningPickReward } from "../internals/MiningPickReward";
+import { Leaderboard } from "../internals/Leaderboard";
 
 type RegisterOptions = {
   value: number;
@@ -38,7 +49,21 @@ type RegisterOptions = {
   activityName: string;
   day: number;
   replaceOnly?: boolean;
+  cb?: () => void | Promise<void>;
 };
+
+interface categoryData {
+
+  handler: undefined | (() => Promise<void>),
+  limit?: number
+
+}
+
+interface entryData extends DayEntry {
+
+  challengeID: number
+
+}
 
 export default class Upload extends Command {
   name = "upload";
@@ -48,6 +73,7 @@ export default class Upload extends Command {
   challenge!: Challenge;
   date!: DateTime;
   maxDay!: number;
+  today!: number;
   month!: string;
   prompt!: Prompt;
 
@@ -62,76 +88,73 @@ export default class Upload extends Command {
       return msg.channel.send("wrong channel");
     }
 
-    this.date = DateTime.local(this.challenge.Year, this.challenge.Month - 1);
-    this.date.setLocale('en-US')
+    const tokens = this.challenge.Name.split(' ');
+    const parsed_string = `${tokens[3] + " " + tokens[4]}`
+
+    this.date = DateTime.fromFormat(parsed_string, 'LLLL y', { locale: 'en-US' })
     this.maxDay = this.date.daysInMonth;
     this.month = this.date.monthLong;
+    this.today = DateTime.now().day;
 
-    const categoryHandler = new Map<string, () => Promise<void>>();
-    categoryHandler.set("steps", () => this.handleSteps());
-    categoryHandler.set("cycling", () => this.handleCycling());
-    categoryHandler.set("strength", () => this.handleStrength());
-    categoryHandler.set("yoga", () => this.handleYogaAndMeditation("yoga"));
-    categoryHandler.set("meditation", () =>
-      this.handleYogaAndMeditation("meditation")
-    );
-    categoryHandler.set("rowing", () => this.handleRowing());
-    categoryHandler.set("other cardio", () => this.handleOtherCardio());
-    categoryHandler.set("bonus challenges", () => this.handleBonusChallenges());
-    categoryHandler.set("remove previous upload", () => this.handleUploadRemove())
-
-    let handler: undefined | (() => Promise<void>);
-
-    if (args[0]) {
-      let category = args[0];
-
-      if (category === "bonus") {
-        category = "bonus challenges";
-      } else if (category === "othercardio") {
-        category = "other cardio";
-      }
-
-      const cb = categoryHandler.get(category);
-
-      if (!cb) {
-        const categories = [...categoryHandler.keys()]
-          .map((x) => {
-            if (x === "bonus challenges") {
-              x = "bonus";
-            } else if (x === "other cardio") {
-              x = "othercardio";
-            }
-
-            return inlineCode(x);
-          })
-          .join(", ");
-
-        return msg.channel.send(
-          oneLine`Invalid category. Valid categories are ${categories}.`
-        );
-      }
-
-      handler = cb;
-    }
+    const categoryHandler = new Map<string, categoryData>();
+    categoryHandler.set("steps", { handler: () => this.handleSteps() });
+    categoryHandler.set("cycling", { handler: () => this.handleCycling() });
+    categoryHandler.set("strength", { handler: () => this.handleStrength() });
+    categoryHandler.set("yoga", { handler: () => this.handleYogaAndMeditation('yoga') });
+    categoryHandler.set("meditation", {
+      handler: () =>
+        this.handleYogaAndMeditation("meditation")
+    });
+    categoryHandler.set("rowing", { handler: () => this.handleRowing() });
+    categoryHandler.set("other cardio", { handler: () => this.handleOtherCardio() });
+    categoryHandler.set("bonus challenges", { handler: () => this.handleBonusChallenges() });
+    categoryHandler.set("remove previous upload", { handler: () => this.handleUploadRemove() })
 
     const question = "Please select a category to upload for points";
     const menu = new ButtonHandler(msg, question);
 
     let i = 1;
-    for (const [category, handler] of categoryHandler) {
-      menu.addButton(NB[i], category, handler);
+    for (const [category, { handler }] of categoryHandler) {
+
+      const handleMethod = async () => {
+
+        if (handler) {
+
+          await handler();
+          const leaderboard = new Leaderboard()
+          await leaderboard.init(this.challenge);
+
+          const images = await leaderboard.generateImage()
+
+          await nukeChannel(leaderboard.channel);
+
+          await Promise.all(images.map((image, i) => {
+
+            const embed = new MessageEmbed()
+            embed.attachFiles([image]);
+            embed.setImage(`attachment://page${i + 1}.jpg`);
+            return leaderboard.channel.send(embed)
+
+          }))
+
+
+        }
+
+      }
+      menu.addButton(NB[i], category, handleMethod!);
       i++;
     }
 
     menu.addCloseButton();
 
     try {
-      handler ? await handler() : await menu.run();
 
+      await menu.run();
       msg.channel.send(
         oneLine`For a total overview of your uploads this month, use
         \`${client.prefix}progress\`.`
       );
+
     } catch (err) {
 
       console.error(err);
@@ -142,8 +165,9 @@ export default class Upload extends Command {
     }
   }
 
-  private getConversionRate(challengeName: ChallengeName) {
-    const lookupID = `${challengeName}-${this.challenge.ID}`;
+  private getConversionRate(challengeName: ChallengeName, challengeID = this.challenge.ID) {
+
+    const lookupID = `${challengeName}-${challengeID}`;
     const conversionRate = this.convertTable.get(lookupID);
 
     if (!conversionRate)
@@ -164,15 +188,13 @@ export default class Upload extends Command {
     }
   }
 
-  private showSuccessMessage(data: RegisterOptions) {
-
+  private async showSuccessMessage(data: RegisterOptions) {
 
     const conversionRate = this.getConversionRate(data.challengeName);
     const points = Math.round(conversionRate * data.value);
     const xp = getXp(points);
 
-
-    let amount;
+    let amount: number | string = '';
 
     if (data.challengeName == "yoga10" || data.challengeName == "yoga30" || data.challengeName == "meditation10" || data.challengeName == "meditation30"
       || data.challengeName == "get10walks" || data.challengeName == "get10cycling"
@@ -185,41 +207,244 @@ export default class Upload extends Command {
     }
 
     else {
-      amount = bold(data.value);
+      amount = data.value;
     }
 
-    const text = oneLine`You have registered ${amount} ${data.activityName} on
+
+    const text = oneLine`You have registered ${bold(amount)} ${data.activityName} on
       ${bold(this.month)} ${bold(data.day)} and earned ${bold(points)} monthly
       points + ${bold(xp)} permanent XP!`;
 
-    this.msg.channel.send(text);
+    await this.msg.channel.send(text);
+    await this.weekstreakCheck(data.day);
+    await xpLog(this.msg, `Registered Day: ${data.day} Progress: ${data.value} ${data.challengeName}`);
+
   }
 
-  private showAddMessage(data: RegisterOptions) {
+  private async weekstreakCheck(monthDay: number) {
+
+
+    const currentDate = DateTime.fromObject({ year: this.date.year, month: this.date.month, day: monthDay });
+
+    let nextSundayIsNextMonth = false;
+
+    const todayIndex = currentDate.weekday - 1; //make monday start at 0
+    let previousMonday = currentDate.minus({ days: todayIndex }) // correct
+    let nextSunday = currentDate.plus({ days: 6 - todayIndex });
+
+    //set monday to previous month
+    // uploading on start of next challenge
+    // if (currentDate.daysInMonth - currentDate.day > currentDate.daysInMonth - 7) {
+
+    //   previousMonday = currentDate.set(
+    //     {
+    //       year: this.date.month == 1 ? this.date.year - 1 : this.date.year,
+    //       month: this.date.month - 1,
+    //       weekday: 1
+    //     }
+    //   );
+    //   isOverlappingStart = true;
+
+    // }
+
+    // //set sunday to next month
+    // //uploading on end of current challenge
+    // if (currentDate.daysInMonth - currentDate.day < 7) {
+
+    //   nextSunday = currentDate.set(
+    //     {
+    //       year: this.date.month == 12 ? this.date.year + 1 : this.date.year,
+    //       month: this.date.month + 1,
+    //       weekday: 7
+    //     }
+    //   );
+    //   isOverlappingEnd = true;
+
+    // }
+
+
+    let currentWeek: [string, entryData[]][] = [];
+
+    if (nextSunday.month == currentDate.month && previousMonday.month == currentDate.month) {
+
+      let entries = await getDayEntries(this.msg.author.id, this.challenge.ID);
+      entries = entries.map(entry => ({ ...entry, challengeID: this.challenge.ID }));
+
+      const dayEntries = Object.entries(groupBy(entries, (x) => x.Day));
+      const filtered_entries = dayEntries.filter(([day, data]) => parseInt(day) >= previousMonday.day && parseInt(day) <= nextSunday.day);
+      currentWeek = filtered_entries as [string, entryData[]][];
+
+    }
+
+    if (previousMonday.month != currentDate.month) {
+
+      //old month entries
+      let priorEntries = await getDayEntries(this.msg.author.id, this.challenge.ID - 1);
+      priorEntries = priorEntries.map(entry => ({ ...entry, challengeID: this.challenge.ID - 1 }));
+
+      const parsedPriorEntries = Object.entries(groupBy(priorEntries, (x) => x.Day));
+      const filtered_prior = parsedPriorEntries.filter(([day, data]) => parseInt(day) >= previousMonday.day && parseInt(day) <= previousMonday.daysInMonth);
+
+      // new month entries
+      let entries = await getDayEntries(this.msg.author.id, this.challenge.ID);
+      entries = entries.map(entry => ({ ...entry, challengeID: this.challenge.ID }));
+
+      const dayEntries = Object.entries(groupBy(entries, (x) => x.Day));
+      const filtered_entries = dayEntries.filter(([day, data]) => parseInt(day) >= 1 && parseInt(day) <= nextSunday.day);
+
+      currentWeek = [...filtered_prior, ...filtered_entries] as [string, entryData[]][];;
+
+    }
+
+    if (nextSunday.month != currentDate.month) {
+
+      //this month entries
+      let priorEntries = await getDayEntries(this.msg.author.id, this.challenge.ID);
+      priorEntries = priorEntries.map(entry => ({ ...entry, challengeID: this.challenge.ID }));
+
+      const parsedPriorEntries = Object.entries(groupBy(priorEntries, (x) => x.Day));
+      const filtered_prior = parsedPriorEntries.filter(([day, data]) => parseInt(day) >= previousMonday.day && parseInt(day) <= previousMonday.daysInMonth);
+
+      // next month entries
+      let entries = await getDayEntries(this.msg.author.id, this.challenge.ID + 1);
+      entries = entries.map(entry => ({ ...entry, challengeID: this.challenge.ID + 1 }));
+
+      const dayEntries = Object.entries(groupBy(entries, (x) => x.Day));
+      const filtered_entries = dayEntries.filter(([day, data]) => parseInt(day) >= 1 && parseInt(day) <= nextSunday.day);
+
+      currentWeek = [...filtered_prior, ...filtered_entries] as [string, entryData[]][];;
+      nextSundayIsNextMonth = true;
+
+    }
+
+    const has_streak = currentWeek.find(([day, data]) => parseInt(day) == nextSunday.day && data.find(entry => entry.ValueType == "weekstreak"));
+
+    if (has_streak) return;
+
+    const pointData = new Map();
+
+    currentWeek.map(([day, data]) => {
+
+      data.map(entry => {
+
+        const conversionRate = this.getConversionRate(entry.ValueType, entry.challengeID);
+        const points = Math.round(conversionRate * entry.Value);
+
+        if (pointData.get(entry.Day)) {
+
+          pointData.set(entry.Day, pointData.get(entry.Day) + points);
+
+        }
+
+        else {
+
+          pointData.set(entry.Day, points);
+
+        }
+
+      })
+
+    })
+
+    if (pointData.size < 7) return;
+
+    let isValid = true;
+    pointData.forEach((val, key) => {
+
+      if (val < 5) {
+        isValid = false;
+      }
+
+    })
+
+    if (!isValid) return;
+
+    // await addXP(this.msg.author.id, 20);
+
+    // uploading on start of next challenge
+    if (nextSundayIsNextMonth) {
+
+      await registerDayEntry(
+        this.msg.author.id,
+        nextSunday.day,
+        this.challenge.ID + 1,
+        'weekstreak',
+        1
+      );
+
+    }
+
+    else {
+
+      await registerDayEntry(
+        this.msg.author.id,
+        nextSunday.day,
+        this.challenge.ID,
+        'weekstreak',
+        1
+      );
+
+    }
+
+    await this.msg.channel.send(`You have earned a weekstreak bonus for getting **5** points every day of the week! Earned **10** monthly points + **20** permanent XP!`)
+    await client.logChannel.send(`<@${this.msg.member?.id}> has earned a weekstreak bonus for getting **5** points every day of the week! (+20 xp)`)
+
+  }
+
+  private async showAddMessage(data: RegisterOptions) {
+
     const conversionRate = this.getConversionRate(data.challengeName);
     const points = Math.round(conversionRate * data.value);
     const xp = getXp(points);
-    const amount = data.value === 1 ? "a" : bold(data.value);
+    const amount = data.value === 1 ? "a" : data.value;
 
-    const text = oneLine`You have registered ${amount} additional
+    const text = oneLine`You have registered ${bold(amount)} additional
       ${data.activityName} on ${bold(this.month)} ${bold(data.day)} and earned
       ${bold(points)} monthly points + ${bold(xp)} permanent XP!`;
 
-    this.msg.channel.send(text);
+    await this.msg.channel.send(text);
+    await this.weekstreakCheck(data.day);
+    await xpLog(this.msg, `Registered Day: ${data.day} Progress: ${data.value} ${data.challengeName}`);
+
   }
 
-  private showReplaceMessage(data: RegisterOptions) {
+  private async showReplaceMessage(data: RegisterOptions, originalValue?: number) {
+
     const conversionRate = this.getConversionRate(data.challengeName);
     const points = Math.round(conversionRate * data.value);
     const xp = getXp(points);
-    const amount = data.value === 1 ? "a" : bold(data.value);
+    const amount = data.value === 1 ? "a" : data.value;
 
-    const text = oneLine`You have registered ${amount} ${data.activityName} on
-      ${bold(this.month)} ${bold(data.day)} and earned ${bold(points)} monthly
-      points + ${bold(xp)} permanent XP! Your previous gained points for this
-      day have been removed.`;
+    const difference = data.value - originalValue!;
 
-    this.msg.channel.send(text);
+    let xp_warning = '';
+
+    if (difference >= 0) {
+
+      const added_points = Math.round(conversionRate * difference);
+      const added_xp = getXp(added_points);
+      xp_warning = `and earned additional ${bold(added_points)} monthly
+      points + ${bold(added_xp)} permanent XP!`;
+
+    }
+    else {
+
+      const removed_points = Math.round(conversionRate * Math.abs(difference));
+      const removed_xp = getXp(removed_points);
+      xp_warning = `. ${bold(removed_points)} monthly points and ${bold(removed_xp)} permanent XP has been removed.`
+
+    }
+
+    //You have replaced x steps with x steps and earned x additional points + x permanent XP!
+    const text = oneLine`You have replaced ${bold(originalValue!)} with ${bold(amount)} ${bold(data.activityName)} on
+      ${bold(this.month)} ${bold(data.day)} ${xp_warning}`;
+
+    await this.msg.channel.send(text);
+    await this.weekstreakCheck(data.day);
+
+    await xpLog(this.msg, `Registered Day: ${data.day} Progress: ${data.value - originalValue!} ${data.challengeName}`);
+
+
   }
 
   private validateDay(day: number) {
@@ -311,36 +536,46 @@ export default class Upload extends Command {
         options.value
       );
 
-      this.showSuccessMessage(options);
+      if (options.cb) {
+        await options.cb();
+      }
+
+      await this.showSuccessMessage(options);
+
     } catch (e: unknown) {
 
       console.error(e);
+
       const { day, activityName, value } = options;
       const err = e as OverlapError;
-      const amount = value === 1 ? "a" : bold(err.dayEntry.Value);
-      const question = oneLine`You already registered ${amount} ${activityName} on
+      const amount = err.dayEntry.Value == 1 ? "a" : err.dayEntry.Value;
+
+      const question = oneLine`You already registered ${bold(amount)} ${activityName} on
         ${bold(this.month)} ${bold(day)}. Do you want to
         replace ${options?.replaceOnly ? "" : "or add"}
         points on this day?`;
 
       const menu = new ButtonHandler(this.msg, question);
 
-      menu.addButton(BLUE_BUTTON, "replace", () => {
-        replaceDayEntry(
+      menu.addButton(BLUE_BUTTON, "replace", async () => {
+
+        await replaceDayEntry(
           this.msg.author.id,
           options.day,
           this.challenge.ID,
           options.challengeName,
-          options.value
+          value
         );
 
-        this.msg.channel.send(`Successfully replaced`);
-        this.showReplaceMessage(options);
+        await this.msg.channel.send(`Successfully replaced`);
+        await this.showReplaceMessage(options, err.dayEntry.Value);
+
       });
 
       if (!options?.replaceOnly) {
-        menu.addButton(RED_BUTTON, "add points", () => {
-          addDayEntry(
+        menu.addButton(RED_BUTTON, "add points", async () => {
+
+          await addDayEntry(
             this.msg.author.id,
             options.day,
             this.challenge.ID,
@@ -349,7 +584,7 @@ export default class Upload extends Command {
           );
 
           this.msg.channel.send(`Successfully added`);
-          this.showAddMessage(options);
+          await this.showAddMessage(options);
         });
       }
 
@@ -398,6 +633,9 @@ export default class Upload extends Command {
     const day = await this.prompt.ask('What day would you like to remove a workout on?')
     // What kind of workout do you want to remove from this day?
 
+
+    this.validateDay(parseInt(day))
+
     const entries = await getDayEntries(this.msg.author.id, this.challenge.ID);
     const dayEntry = entries.filter(entry => entry.Day == parseInt(day));
     if (!dayEntry.length) {
@@ -410,8 +648,27 @@ export default class Upload extends Command {
       dayEntry.map((entry, i) => {
 
         menu.addButton(NUMBER_BUTTONS[i], entry.ValueType, async () => {
+
           await deleteDayEntry(this.msg.author.id, entry.Day, this.challenge.ID, entry.ValueType)
           await this.msg.channel.send(oneLine`Your ${bold(entry.ValueType)} workout has been removed from day ${bold(day + " " + this.date.toFormat("MMMM"))}.Your previous gained points for this workout have been removed.`)
+          const player = await Player.getPlayer(this.msg.member!);
+
+          const point = entry.Value * this.getConversionRate(entry.ValueType)!;
+
+          const xp = Math.round(getXp(point));
+
+          const pickCount = Math.floor(Math.abs(xp) / 10);
+
+          for (let i = 0; i < pickCount; i++) {
+
+            await removeInventory(this.msg.member!.id, 'pick_mining')
+            await MiningPickReward.setUpperLimit(player);
+
+          }
+
+          await this.msg.channel.send(`You have lost ${bold(pickCount)} mining picks.`)
+
+
         })
 
       })
@@ -440,93 +697,142 @@ export default class Upload extends Command {
     });
 
     menu.addButton(NB[2], "Get 10 walks over 5km/3,1mi", async () => {
-      await this.handleBonusWalkAndCycle("walking");
+      await this.handleBonus("get10walks", 1, () => this.handleBonusWalkAndCycle("walking"))
     });
 
     menu.addButton(
       NB[3],
       "Get 10 cycling sessions over 15km/9,32mi",
       async () => {
-        await this.handleBonusWalkAndCycle("cycling");
+        await this.handleBonus("get10cycling", 1, () => this.handleBonusWalkAndCycle("cycling"))
       }
+
     );
 
     menu.addButton(NB[4], "Read an educational book", async () => {
-      await this.handleBook();
+
+      await this.handleBonus("readabook", 1, () => this.handleBook())
+
     });
 
     menu.addButton(NB[5], "Food diary", async () => {
-      await this.handleFoodDiary();
+
+      await this.handleBonus("diary", 5, () => this.handleFoodDiary())
+
     });
 
 
     menu.addButton(NB[6], "Set a monthly personal goal", async () => {
 
-      const goals = await getAllGoals(this.msg.author.id);
-      const unfinishedGoal = goals.find(goal => !goal.Finished);
+      try {
 
-      if ((this.date.day <= 5 || this.date.day >= 28)) {
+        const goals = await getAllGoals(this.msg.author.id);
+        const unfinishedGoal = goals.find(goal => !goal.Finished);
 
-        if (unfinishedGoal) {
+        if ((this.today <= 5 || this.today >= 28)) {
 
-          const question = oneLine`You are early! Your personal goal is the following:
+          if (unfinishedGoal) {
+
+            const question = oneLine`Your personal goal is the following:
             \n**${unfinishedGoal.goal}**\n
-            You can claim bonus points after the 5th of this month. Or do you want to 
+            Have you completed your goal? Or do you want to 
             remove your current personal challenge? 
             `
-          const menu = new ButtonHandler(this.msg, question);
-          menu.addButton(RED_BUTTON, "Remove Challenge", async () => {
+            const menu = new ButtonHandler(this.msg, question);
+            menu.addButton(RED_BUTTON, "Remove Challenge", async () => {
 
-            await removeGoal(unfinishedGoal.ID);
-            await this.msg.channel.send("You removed your personal goal. Rerun $upload to set a new goal!")
+              await removeGoal(unfinishedGoal.ID);
+              await this.msg.channel.send("You removed your personal goal. Rerun $upload to set a new goal!")
 
-          })
+            })
 
-          menu.addCloseButton();
-          await menu.run();
+            await menu.addButton(BLUE_BUTTON, "Complete Challenge", async () => {
 
+              await this.confirmSummary(unfinishedGoal);
 
-        }
+            })
 
-        else {
+            menu.addCloseButton();
+            await menu.run();
 
-          await this.addPersonalGoal();
+          }
 
-        }
+          else {
 
-      }
+            await this.addPersonalGoal();
 
-      else {
-
-        if (unfinishedGoal) {
-
-          await this.viewPersonalGoal(unfinishedGoal);
+          }
 
         }
 
         else {
 
-          await this.msg.channel.send("You can only submit a new challenge between the 28th and the 5th of next month")
+          if (unfinishedGoal) {
+
+            await this.viewPersonalGoal(unfinishedGoal);
+
+          }
+
+          else {
+
+            await this.msg.channel.send("You can only submit a new challenge between the 28th and the 5th of next month")
+
+          }
 
         }
 
       }
+
+      catch (e) {
+
+
+
+      }
+
 
     });
 
 
     menu.addButton(NB[7], "Share a workout selfie", async () => {
-      await this.handleWorkoutSelfie();
+
+      await this.handleBonus("workoutselfie", 4, () => this.handleWorkoutSelfie())
+
     });
 
     menu.addButton(NB[8], "Share a personal photo", async () => {
-      await this.handlePersonalPhoto();
+
+      await this.handleBonus("personalphoto", 1, () => this.handlePersonalPhoto())
+
     });
 
     menu.addCloseButton();
-    await menu.run();
+    try {
+      await menu.run();
+    }
+    catch (e) {
+      console.log('error caught: ' + e)
+    }
   }
 
+  private async handleBonus(type: ChallengeName, limit: number, cb: () => Promise<void>) {
+
+    try {
+      const count = await getEntryCount(type, this.msg.author.id);
+      if (count >= limit) throw new Error(`You can't have more than ${bold(limit)} ${type} per month.`)
+      await cb()
+
+    }
+    catch (err) {
+
+      console.error(err);
+      this.msg.channel.send((err as Error).message);
+      this.msg.channel.send(
+        `Upload process failed. Please rerun \`${client.prefix}${this.name}\``
+      );
+
+    }
+
+  }
 
   private async viewPersonalGoal(goal: Goal) {
 
@@ -540,7 +846,6 @@ export default class Upload extends Command {
 
       await this.confirmSummary(goal)
 
-
     })
     mainMenu.addCloseButton();
     await mainMenu.run();
@@ -549,7 +854,6 @@ export default class Upload extends Command {
 
 
   private async addPersonalGoal() {
-
 
     const menu = new ButtonHandler(
       this.msg,
@@ -575,7 +879,14 @@ export default class Upload extends Command {
     });
 
     menu.addCloseButton();
-    await menu.run();
+    try {
+      await menu.run();
+    }
+    catch (e) {
+      console.error(e);
+
+    }
+
   }
 
 
@@ -594,7 +905,7 @@ export default class Upload extends Command {
       const image = await this.getProof(
         1,
         activity,
-        this.date.day,
+        this.today,
         "Please upload your personal photo now."
       );
 
@@ -602,24 +913,30 @@ export default class Upload extends Command {
         write it in 1 message.`
 
 
-      const confirmation = await this.confirm(title, oneLine`Your text with your personal photo is the following:%s, this will be shared with your photo. Is this
+      const confirmation = await this.confirm(title, oneLine`Your text with your personal photo is the following: %s, this will be shared with your photo. Is this
         correct?`)
 
       if (confirmation) {
+
         await this.registerDay({
           value: 1,
           challengeName,
           activityName: activity,
-          day: this.date.day,
-          replaceOnly: true
+          day: this.today,
+          replaceOnly: true,
+          cb: () => {
+
+            client.mainTextChannel.send(
+              oneLine`<@${this.msg.author.id}> has uploaded a personal photo!
+              ${bold(confirmation)} `
+              , {
+                files: image ? [image] : []
+              });
+
+          }
         });
 
-        client.mainTextChannel.send(
-          oneLine`<@${this.msg.author.id}> has uploaded a personal photo!
-          ${bold(confirmation)} `
-          , {
-            files: image ? [image] : []
-          });
+
       }
     });
 
@@ -628,6 +945,7 @@ export default class Upload extends Command {
   }
 
   private async handleWorkoutSelfie() {
+
     const challengeName: ChallengeName = "workoutselfie";
     const activity = "share a workout selfie";
     const menu = new ButtonHandler(
@@ -641,7 +959,7 @@ export default class Upload extends Command {
       const image = await this.getProof(
         1,
         activity,
-        this.date.day,
+        this.today,
         "Please upload your workout selfie now."
       );
 
@@ -649,7 +967,7 @@ export default class Upload extends Command {
         it in 1 message.`
 
       const confirmation = await this.confirm(title,
-        oneLine`Your title/text with your workout selfie is the following:%s, this will be shared with your workout selfie. Is
+        oneLine`Your title/text with your workout selfie is the following: %s, this will be shared with your workout selfie. Is
         this correct?`
       );
 
@@ -657,15 +975,18 @@ export default class Upload extends Command {
         await this.registerDay({
           value: 1,
           challengeName,
-          activityName: activity,
-          day: this.date.day,
-          replaceOnly: true
+          activityName: 'workout selfie',
+          day: this.today,
+          replaceOnly: true,
+          cb: () => {
+            client.mainTextChannel.send(
+              oneLine`<@${this.msg.author.id}> has uploaded a workoutselfie with the following text: 
+              ${bold(confirmation)}`
+              , { files: image ? [image] : [] });
+          }
         });
 
-        client.mainTextChannel.send(
-          oneLine`<@${this.msg.author.id}> has uploaded a workoutselfie with the following text: 
-          ${bold(confirmation)}`
-          , { files: image ? [image] : [] });
+
       }
     });
 
@@ -739,17 +1060,23 @@ export default class Upload extends Command {
             value: 1,
             activityName: "book",
             challengeName,
-            day: this.date.day,
+            day: this.today,
+            cb: async () => {
+
+              await finishBook(book.ID, confirmation);
+              await client.mainTextChannel.send(
+                oneLine`<@${this.msg.author.id}> has finished the book
+                  ${bold(book.Name)}! The evaluation is the following:
+                  ${bold(confirmation)}.  Hopefully this also helps you to consider
+                  picking the book up or not!`
+              );
+              if (book.image) {
+                client.mainTextChannel.send(book.image)
+              }
+
+            }
           });
 
-          await finishBook(book.ID, confirmation);
-
-          client.mainTextChannel.send(
-            oneLine`<@${this.msg.author.id}> has finished the book
-              ${bold(book.Name)}! The evaluation is the following:
-              ${bold(confirmation)}.  Hopefully this also helps you to consider
-              picking the book up or not!`
-          );
         }
       });
 
@@ -764,7 +1091,6 @@ export default class Upload extends Command {
 
           if (confirmation) {
             await removeBook(book.ID);
-
             this.msg.channel.send(
               oneLine`You have removed ${bold(book.Name)} from the read a
                 book challenge!`
@@ -824,7 +1150,7 @@ export default class Upload extends Command {
           image = await this.getProof(
             1,
             challengeName,
-            this.date.day,
+            this.today,
             "Please upload 1 picture of your book in the chat"
           );
 
@@ -840,9 +1166,10 @@ export default class Upload extends Command {
         await registerBook({
           $userID: this.msg.author.id,
           $challengeID: this.challenge.ID,
-          $day: this.date.day,
+          $day: this.today,
           $name: bookNameConfirmation,
           $lesson: bookLessonConfirmation,
+          $image: image ? image!.url : ""
         });
 
         const succesMessage = oneLine`Excellent! Your book is registered and you
@@ -1200,6 +1527,7 @@ export default class Upload extends Command {
 
           this.msg.channel.send(`Successfully replaced`);
           this.showReplaceMessage(options);
+
         });
 
         menu.addCloseButton();
@@ -1563,23 +1891,30 @@ export default class Upload extends Command {
 
     const promise = new Promise<string>(async (resolve, reject) => {
 
-      const answer = await this.prompt.ask(prompt)
-      const menu = new ButtonHandler(this.msg, confirmation_msg.replace('%s', bold(answer)))
+      try {
 
-      menu.addButton(BLUE_BUTTON, "yes", async () => {
+        const answer = await this.prompt.ask(prompt)
+        const menu = new ButtonHandler(this.msg, confirmation_msg.replace('%s', bold(answer)))
 
-        resolve(answer);
+        menu.addButton(BLUE_BUTTON, "yes", async () => {
 
-      })
+          resolve(answer);
 
-      menu.addButton(RED_BUTTON, "no", async () => {
+        })
 
-        resolve(this.confirm(prompt, confirmation_msg));
+        menu.addButton(RED_BUTTON, "no", async () => {
 
-      })
+          resolve(this.confirm(prompt, confirmation_msg));
 
-      menu.addCloseButton()
-      await menu.run()
+        })
+
+        await menu.run()
+
+      }
+
+      catch (e) {
+        reject(e)
+      }
 
     })
 
@@ -1601,8 +1936,8 @@ export default class Upload extends Command {
     await this.registerDay({
       value: 1,
       challengeName: "personalgoal",
-      activityName: goal.goal,
-      day: this.date.day,
+      activityName: "personalgoal",
+      day: this.today,
       replaceOnly: true
     });
 
@@ -1611,7 +1946,7 @@ export default class Upload extends Command {
 
     await Promise.all(images.map(async image => {
 
-      return client.mainTextChannel.send('', { files: [image] })
+      return client.mainTextChannel.send({ files: [image] })
 
     }))
 

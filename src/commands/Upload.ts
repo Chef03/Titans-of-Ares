@@ -63,6 +63,7 @@ export default class Upload extends Command {
     }
 
     this.date = DateTime.local(this.challenge.Year, this.challenge.Month - 1);
+    this.date.setLocale('en-US')
     this.maxDay = this.date.daysInMonth;
     this.month = this.date.monthLong;
 
